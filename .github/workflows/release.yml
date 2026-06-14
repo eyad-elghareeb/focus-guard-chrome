@@ -19,7 +19,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           echo "Building FocusGuard ${VERSION}"
           mkdir -p dist
-          zip -r "dist/focusguard-chrome-${VERSION}.zip" \
+          zip -r "dist/focusguard-firefox-${VERSION}.zip" \
             manifest.json \
             background/ \
             blocked/ \
@@ -27,18 +27,9 @@ jobs:
             newtab/ \
             popup/
 
-      - name: Build CRX
-        if: ${{ secrets.PEM_KEY != '' }}
-        run: |
-          VERSION="${GITHUB_REF_NAME}"
-          echo "${{ secrets.PEM_KEY }}" | base64 -d > key.pem
-          npx crx3 "dist/focusguard-chrome-${VERSION}.zip" \
-            -k key.pem \
-            -o "dist/focusguard-chrome-${VERSION}.crx"
-          rm -f key.pem
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: dist/*.zip
           generate_release_notes: true
+          fail_on_unmatched_files: false
