@@ -1,0 +1,44 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build extension zip
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          echo "Building FocusGuard ${VERSION}"
+          mkdir -p dist
+          zip -r "dist/focusguard-chrome-${VERSION}.zip" \
+            manifest.json \
+            background/ \
+            blocked/ \
+            icons/ \
+            newtab/ \
+            popup/
+
+      - name: Build CRX
+        if: ${{ secrets.PEM_KEY != '' }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          echo "${{ secrets.PEM_KEY }}" | base64 -d > key.pem
+          npx crx3 "dist/focusguard-chrome-${VERSION}.zip" \
+            -k key.pem \
+            -o "dist/focusguard-chrome-${VERSION}.crx"
+          rm -f key.pem
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
