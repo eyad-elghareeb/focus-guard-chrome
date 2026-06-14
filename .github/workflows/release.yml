@@ -1,6 +1,7 @@
 name: Build & Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -13,6 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Build extension zip
         run: |
@@ -27,9 +32,18 @@ jobs:
             newtab/ \
             popup/
 
+      - name: Build CRX (Chrome)
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          npm install -g crx3
+          echo "${{ secrets.PEM_KEY }}" | base64 -d > key.pem
+          mkdir -p staging
+          cp -r manifest.json background/ blocked/ icons/ newtab/ popup/ staging/
+          crx3 -p key.pem -o "dist/focusguard-chrome-${VERSION}.crx" staging
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: false
