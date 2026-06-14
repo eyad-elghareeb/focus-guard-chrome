@@ -4,11 +4,6 @@
             alarms, notifications, and message passing
    ============================================================ */
 
-// ─── Chrome MV3 Compatibility ─────────────────────────────────
-if (typeof browser === "undefined") {
-  var browser = chrome;
-}
-
 // ─── Constants ────────────────────────────────────────────────
 const POMODORO_WORK = 25 * 60;        // 25 minutes in seconds
 const POMODORO_SHORT_BREAK = 5 * 60;  // 5 minutes
@@ -74,7 +69,13 @@ const DEFAULT_STATE = {
   // Manual study log entries
   studyLog: [],
   // Todo list
-  todos: []
+  todos: [],
+  // Quick access sites
+  quickAccess: [
+    { domain: "github.com" },
+    { domain: "stackoverflow.com" },
+    { domain: "developer.mozilla.org" }
+  ]
 };
 
 // ─── State Management ─────────────────────────────────────────
@@ -328,7 +329,7 @@ async function onTimerComplete(s) {
       s.timer.totalSeconds = s.settings.shortBreakDuration;
     }
 
-    // Notification
+    // Notification & Sound
     if (s.settings.notificationsEnabled) {
       browser.notifications.create({
         type: "basic",
@@ -336,6 +337,9 @@ async function onTimerComplete(s) {
         title: "FocusGuard",
         message: `Pomodoro #${s.timer.completedPomodoros} complete! Time for a ${s.timer.mode === "long_break" ? "long" : "short"} break.`
       });
+      broadcastSound();
+    } else if (s.settings.soundEnabled) {
+      broadcastSound();
     }
 
     // Auto-start break
@@ -380,7 +384,7 @@ async function onTimerComplete(s) {
     s.timer.remainingSeconds = s.settings.workDuration;
     s.timer.totalSeconds = s.settings.workDuration;
 
-    // Notification
+    // Notification & Sound
     if (s.settings.notificationsEnabled) {
       browser.notifications.create({
         type: "basic",
@@ -388,6 +392,9 @@ async function onTimerComplete(s) {
         title: "FocusGuard",
         message: "Break is over! Time to focus."
       });
+      broadcastSound();
+    } else if (s.settings.soundEnabled) {
+      broadcastSound();
     }
 
     // Auto-start work
@@ -439,7 +446,7 @@ function clearBadge() {
 // ─── Site Tracking ────────────────────────────────────────────
 async function trackSiteVisit(tabId, url) {
   if (!url || url.startsWith("about:") || url.startsWith("moz-extension:") ||
-      url.startsWith("chrome-extension:") || url.startsWith("chrome:") || url.startsWith("data:")) return;
+      url.startsWith("chrome:") || url.startsWith("data:")) return;
 
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, "");
@@ -479,7 +486,7 @@ async function updateSiteActiveTime() {
     if (tabs.length > 0 && tabs[0].url) {
       const url = tabs[0].url;
       if (url.startsWith("about:") || url.startsWith("moz-extension:") ||
-          url.startsWith("chrome-extension:") || url.startsWith("chrome:") || url.startsWith("data:")) return;
+          url.startsWith("chrome:") || url.startsWith("data:")) return;
 
       const hostname = new URL(url).hostname.replace(/^www\./, "");
       if (!hostname) return;
@@ -573,7 +580,7 @@ async function applyBlockingRules(shouldBlock) {
 async function checkAndBlockTab(tabId, url) {
   if (!state || !state.tabsBlockingEnabled) return;
   if (!url || url.startsWith("about:") || url.startsWith("moz-extension:") ||
-      url.startsWith("chrome-extension:") || url.startsWith("chrome:") || url.startsWith("data:")) return;
+      url.startsWith("chrome:") || url.startsWith("data:")) return;
 
   try {
     const s = await getState();
@@ -595,6 +602,13 @@ async function checkAndBlockTab(tabId, url) {
   } catch (e) {
     // Ignore
   }
+}
+
+// ─── Sound Broadcast ───────────────────────────────────────────
+async function broadcastSound() {
+  try {
+    await browser.runtime.sendMessage({ action: "playSound" });
+  } catch (e) { /* no listeners */ }
 }
 
 // ─── Utility Functions ────────────────────────────────────────
@@ -1053,6 +1067,60 @@ async function handleMessage(message) {
 
     case "clearDoneTodos": {
       s.todos = s.todos.filter(t => !t.done);
+      await saveState();
+      return { success: true };
+    }
+
+    // ─── Quick Access Actions ────────────────────────────────────
+    case "addQuickAccess": {
+      const qaDomain = message.domain.toLowerCase().trim();
+      if (!qaDomain) return { success: false };
+      const exists = s.quickAccess.some(q => q.domain === qaDomain);
+      if (!exists) {
+        s.quickAccess.push({ domain: qaDomain });
+        await saveState();
+      }
+      return { success: true };
+    }
+
+    case "removeQuickAccess": {
+      s.quickAccess = s.quickAccess.filter(q => q.domain !== message.domain);
+      await saveState();
+      return { success: true };
+    }
+
+    // ─── Import/Export ───────────────────────────────────────────
+    case "exportData": {
+      const exportObj = {
+        timer: s.timer,
+        settings: s.settings,
+        blockedSites: s.blockedSites,
+        dailyStats: s.dailyStats,
+        studyLog: s.studyLog,
+        sessionLog: s.sessionLog,
+        todos: s.todos,
+        quickAccess: s.quickAccess,
+        siteUsage: s.siteUsage,
+        exportedAt: new Date().toISOString()
+      };
+      return { success: true, data: exportObj };
+    }
+
+    case "importData": {
+      const d = message.data;
+      if (d.settings) Object.assign(s.settings, d.settings);
+      if (d.blockedSites) s.blockedSites = d.blockedSites;
+      if (d.dailyStats) s.dailyStats = { ...s.dailyStats, ...d.dailyStats };
+      if (d.studyLog) s.studyLog = d.studyLog;
+      if (d.sessionLog) s.sessionLog = d.sessionLog;
+      if (d.todos) s.todos = d.todos;
+      if (d.quickAccess) s.quickAccess = d.quickAccess;
+      if (d.timer) {
+        s.timer.isRunning = false;
+        s.timer.isPaused = false;
+        s.timer.lastTick = null;
+        s.timer.sessionStartTimestamp = null;
+      }
       await saveState();
       return { success: true };
     }
