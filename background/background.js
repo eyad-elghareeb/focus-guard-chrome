@@ -3,10 +3,9 @@
    Handles: Timer state, site tracking, blocking coordination,
             alarms, notifications, and message passing
    ============================================================ */
-
 // Chrome MV3 service workers don't auto-load additional files via the
 // manifest; importScripts is the supported way. Firefox loads sync.js
-// through the manifest's `background.scripts` array, so the call below is
+// through the manifest's ackground.scripts array, so the call below is
 // a no-op there (importScripts is undefined in Firefox background pages).
 if (typeof importScripts === "function") {
   try { importScripts("sync.js"); } catch (e) {
@@ -56,15 +55,15 @@ const DEFAULT_STATE = {
   },
   // Blocked sites
   blockedSites: [
-    { domain: "facebook.com", enabled: true, category: "social" },
-    { domain: "twitter.com", enabled: true, category: "social" },
-    { domain: "x.com", enabled: true, category: "social" },
-    { domain: "instagram.com", enabled: true, category: "social" },
-    { domain: "reddit.com", enabled: true, category: "social" },
-    { domain: "tiktok.com", enabled: true, category: "social" },
-    { domain: "youtube.com", enabled: true, category: "entertainment" },
-    { domain: "twitch.tv", enabled: true, category: "entertainment" },
-    { domain: "netflix.com", enabled: true, category: "entertainment" }
+    { domain: "facebook.com", enabled: true, category: "social", timeLimitMinutes: 0 },
+    { domain: "twitter.com", enabled: true, category: "social", timeLimitMinutes: 0 },
+    { domain: "x.com", enabled: true, category: "social", timeLimitMinutes: 0 },
+    { domain: "instagram.com", enabled: true, category: "social", timeLimitMinutes: 0 },
+    { domain: "reddit.com", enabled: true, category: "social", timeLimitMinutes: 0 },
+    { domain: "tiktok.com", enabled: true, category: "social", timeLimitMinutes: 0 },
+    { domain: "youtube.com", enabled: true, category: "entertainment", timeLimitMinutes: 0 },
+    { domain: "twitch.tv", enabled: true, category: "entertainment", timeLimitMinutes: 0 },
+    { domain: "netflix.com", enabled: true, category: "entertainment", timeLimitMinutes: 0 }
   ],
   // Site usage tracking
   siteUsage: {},
@@ -183,10 +182,11 @@ async function startTimer() {
   updateBadge(s.timer.remainingSeconds);
 
   // Apply blocking rules if needed
+  const timeLimited = getTimeLimitedDomains();
   if (s.settings.blockDuringWork && s.timer.mode === "work") {
-    await applyBlockingRules(true);
+    await applyBlockingRules(true, timeLimited);
   } else if (s.settings.blockDuringBreaks && s.timer.mode !== "work") {
-    await applyBlockingRules(true);
+    await applyBlockingRules(true, timeLimited);
   } else {
     await applyBlockingRules(false);
   }
@@ -200,6 +200,8 @@ async function pauseTimer() {
   stopTimerTick();
   await browser.alarms.clear(ALARM_TIMER);
   updateBadge(s.timer.remainingSeconds, true);
+  // Unblock sites when paused
+  await applyBlockingRules(false);
 }
 
 async function resumeTimer() {
@@ -211,6 +213,14 @@ async function resumeTimer() {
   await browser.alarms.clear(ALARM_TIMER);
   browser.alarms.create(ALARM_TIMER, { periodInMinutes: 1 });
   updateBadge(s.timer.remainingSeconds);
+  // Re-apply blocking when resumed
+  if (s.settings.blockDuringWork && s.timer.mode === "work") {
+    await applyBlockingRules(true);
+  } else if (s.settings.blockDuringBreaks && s.timer.mode !== "work") {
+    await applyBlockingRules(true);
+  } else {
+    await applyBlockingRules(false);
+  }
 }
 
 async function stopTimer() {
@@ -398,7 +408,8 @@ async function onTimerComplete(s) {
 
     // Update blocking
     if (s.settings.blockDuringWork) {
-      await applyBlockingRules(s.settings.blockDuringBreaks);
+      const timeLimited = getTimeLimitedDomains();
+      await applyBlockingRules(s.settings.blockDuringBreaks, timeLimited);
     }
 
   } else {
@@ -453,7 +464,8 @@ async function onTimerComplete(s) {
 
     // Apply blocking for work mode
     if (s.settings.blockDuringWork) {
-      await applyBlockingRules(true);
+      const timeLimited = getTimeLimitedDomains();
+      await applyBlockingRules(true, timeLimited);
     }
   }
 
@@ -548,6 +560,20 @@ async function updateSiteActiveTime() {
 
       s.siteUsage[today][hostname].totalSeconds += deltaSeconds;
       s.siteUsage[today][hostname].lastVisit = Date.now();
+
+      // Check time-limit blocking for this domain
+      if (isDomainOverTimeLimit(hostname)) {
+        const timeLimited = getTimeLimitedDomains();
+        if (timeLimited.length > 0) {
+          const isTimerActive = s.timer.isRunning && !s.timer.isPaused;
+          const isWorkBlocking = s.timer.mode === "work" && s.settings.blockDuringWork;
+          const isBreakBlocking = s.timer.mode !== "work" && s.settings.blockDuringBreaks;
+          if (isTimerActive && (isWorkBlocking || isBreakBlocking)) {
+            await applyBlockingRules(true, timeLimited);
+          }
+        }
+      }
+
       await saveState();
     }
   } catch (e) {
@@ -555,12 +581,51 @@ async function updateSiteActiveTime() {
   }
 }
 
+// ─── Time-Limit Blocking ───────────────────────────────────────
+// Returns domains that should be blocked due to exceeding time limits
+function getTimeLimitedDomains() {
+  if (!state) return [];
+  const today = getTodayKey();
+  const usage = state.siteUsage[today] || {};
+  const limited = [];
+  for (const site of state.blockedSites) {
+    if (site.timeLimitMinutes > 0 && site.enabled) {
+      const siteData = usage[site.domain];
+      if (siteData) {
+        const usedSeconds = siteData.totalSeconds || 0;
+        const limitSeconds = site.timeLimitMinutes * 60;
+        if (usedSeconds >= limitSeconds) {
+          limited.push(site.domain);
+        }
+      }
+    }
+  }
+  return limited;
+}
+
+// Check if a specific domain is over its time limit
+function isDomainOverTimeLimit(domain) {
+  if (!state) return false;
+  const today = getTodayKey();
+  const usage = state.siteUsage[today] || {};
+  const site = state.blockedSites.find(s => s.domain === domain);
+  if (!site || site.timeLimitMinutes <= 0 || !site.enabled) return false;
+  const siteData = usage[domain];
+  if (!siteData) return false;
+  return (siteData.totalSeconds || 0) >= site.timeLimitMinutes * 60;
+}
+
 // ─── Blocking Logic ───────────────────────────────────────────
-async function applyBlockingRules(shouldBlock) {
+async function applyBlockingRules(shouldBlock, extraDomains = []) {
   const s = await getState();
-  const enabledSites = shouldBlock
+  let enabledSites = shouldBlock
     ? s.blockedSites.filter(site => site.enabled).map(site => site.domain)
     : [];
+
+  // Add extra domains (time-limited sites that exceeded their limit)
+  if (shouldBlock && extraDomains.length > 0) {
+    enabledSites = [...new Set([...enabledSites, ...extraDomains])];
+  }
 
   // Generate declarativeNetRequest rules — two rules per domain
   // (one for subdomain pattern, one for bare domain)
@@ -696,7 +761,8 @@ browser.alarms.onAlarm.addListener(async (alarm) => {
           ((s.timer.mode === "work" && s.settings.blockDuringWork) ||
            (s.timer.mode !== "work" && s.settings.blockDuringBreaks));
         if (shouldBlock) {
-          await applyBlockingRules(true);
+          const timeLimited = getTimeLimitedDomains();
+          await applyBlockingRules(true, timeLimited);
         }
       }
       await browser.storage.local.remove("emergencyDomain");
@@ -831,11 +897,12 @@ async function handleMessage(message) {
             category: message.site.category || "custom"
           });
           await saveState();
-          // Re-apply blocking if timer is running in work mode
+          // Re-apply blocking if timer is running
           if (s.timer.isRunning && !s.timer.isPaused &&
               ((s.timer.mode === "work" && s.settings.blockDuringWork) ||
                (s.timer.mode !== "work" && s.settings.blockDuringBreaks))) {
-            await applyBlockingRules(true);
+            const timeLimited = getTimeLimitedDomains();
+            await applyBlockingRules(true, timeLimited);
           }
         }
       }
@@ -849,7 +916,8 @@ async function handleMessage(message) {
       if (s.timer.isRunning && !s.timer.isPaused) {
         const shouldBlock = (s.timer.mode === "work" && s.settings.blockDuringWork) ||
                             (s.timer.mode !== "work" && s.settings.blockDuringBreaks);
-        await applyBlockingRules(shouldBlock);
+        const timeLimited = getTimeLimitedDomains();
+        await applyBlockingRules(shouldBlock, timeLimited);
       }
       return { success: true };
     }
@@ -862,8 +930,18 @@ async function handleMessage(message) {
         if (s.timer.isRunning && !s.timer.isPaused) {
           const shouldBlock = (s.timer.mode === "work" && s.settings.blockDuringWork) ||
                               (s.timer.mode !== "work" && s.settings.blockDuringBreaks);
-          await applyBlockingRules(shouldBlock);
+          const timeLimited = getTimeLimitedDomains();
+          await applyBlockingRules(shouldBlock, timeLimited);
         }
+      }
+      return { success: true };
+    }
+
+    case "setSiteTimeLimit": {
+      const limitSite = s.blockedSites.find(bs => bs.domain === message.domain);
+      if (limitSite) {
+        limitSite.timeLimitMinutes = Math.max(0, parseInt(message.minutes) || 0);
+        await saveState();
       }
       return { success: true };
     }
@@ -1051,7 +1129,8 @@ async function handleMessage(message) {
         const shouldBlock = (s.timer.mode === "work" && s.settings.blockDuringWork) ||
                             (s.timer.mode !== "work" && s.settings.blockDuringBreaks);
         if (s.timer.isRunning && shouldBlock) {
-          await applyBlockingRules(true);
+          const timeLimited = getTimeLimitedDomains();
+          await applyBlockingRules(true, timeLimited);
         }
         // Set alarm to re-enable blocking after 5 minutes
         await browser.alarms.clear(ALARM_EMERGENCY);
@@ -1323,7 +1402,8 @@ async function initialize() {
   if (state.timer.isRunning && !state.timer.isPaused) {
     const shouldBlock = (state.timer.mode === "work" && state.settings.blockDuringWork) ||
                         (state.timer.mode !== "work" && state.settings.blockDuringBreaks);
-    await applyBlockingRules(shouldBlock);
+    const timeLimited = getTimeLimitedDomains();
+    await applyBlockingRules(shouldBlock, timeLimited);
   }
 
   console.log("FocusGuard: Background initialized");
