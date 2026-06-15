@@ -35,6 +35,7 @@ jobs:
             background/ \
             blocked/ \
             icons/ \
+            dashboard/ \
             newtab/ \
             popup/
 
@@ -44,7 +45,7 @@ jobs:
           npm install -g crx3
           echo "${{ secrets.PEM_KEY }}" | base64 -d > key.pem
           mkdir -p staging
-          cp -r manifest.json background/ blocked/ icons/ newtab/ popup/ staging/
+          cp -r manifest.json background/ blocked/ dashboard/ icons/ newtab/ popup/ staging/
           crx3 -p key.pem -o "dist/focusguard-chrome-${VERSION}.crx" staging
 
       - name: Create Release
